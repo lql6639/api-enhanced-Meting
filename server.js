@@ -1,0 +1,608 @@
+require('dotenv').config()
+const fs = require('fs')
+const path = require('path')
+const express = require('express')
+const request = require('./util/request')
+const packageJSON = require('./package.json')
+const exec = require('child_process').exec
+const cache = require('./util/apicache').middleware
+const { cookieToJson, maskUrlSecrets } = require('./util/index')
+const fileUpload = require('express-fileupload')
+const decode = require('safe-decode-uri-component')
+const logger = require('./util/logger.js')
+const { APP_CONF } = require('./util/config.json')
+const stats = require('./util/stats')
+const { createIpLimiter } = require('./util/ipLimit')
+
+// /search 是 NCM 最容易触发"操作频繁"的端点（IP + 账号指纹限流）。
+// 在此按 IP 加一层本地限流，避免单 IP 把 NCM 打爆后连累所有用户。
+// 配置：每 IP 每 60 秒最多 30 次搜索请求。
+const searchLimiter = createIpLimiter({ windowMs: 60 * 1000, max: 30 })
+
+/**
+ * The version check result.
+ * @readonly
+ * @enum {number}
+ */
+const VERSION_CHECK_RESULT = {
+  FAILED: -1,
+  NOT_LATEST: 0,
+  LATEST: 1,
+}
+
+/**
+ * @typedef {{
+ *   identifier?: string,
+ *   route: string,
+ *   module: any
+ * }} ModuleDefinition
+ */
+
+/**
+ * @typedef {{
+ *   port?: number,
+ *   host?: string,
+ *   checkVersion?: boolean,
+ *   moduleDefs?: ModuleDefinition[]
+ * }} NcmApiOptions
+ */
+
+/**
+ * @typedef {{
+ *   status: VERSION_CHECK_RESULT,
+ *   ourVersion?: string,
+ *   npmVersion?: string,
+ * }} VersionCheckResult
+ */
+
+/**
+ * @typedef {{
+ *  server?: import('http').Server,
+ * }} ExpressExtension
+ */
+
+/**
+ * Get the module definitions dynamically.
+ *
+ * @param {string} modulesPath The path to modules (JS).
+ * @param {Record<string, string>} [specificRoute] The specific route of specific modules.
+ * @param {boolean} [doRequire] If true, require() the module directly.
+ * Otherwise, print out the module path. Default to true.
+ * @returns {Promise<ModuleDefinition[]>} The module definitions.
+ *
+ * @example getModuleDefinitions("./module", {"album_new.js": "/album/create"})
+ */
+async function getModulesDefinitions(
+  modulesPath,
+  specificRoute,
+  doRequire = true,
+) {
+  const files = await fs.promises.readdir(modulesPath)
+  const parseRoute = (/** @type {string} */ fileName) =>
+    specificRoute && fileName in specificRoute
+      ? specificRoute[fileName]
+      : `/${fileName.replace(/\.js$/i, '').replace(/_/g, '/')}`
+
+  const modules = files
+    .reverse()
+    .filter((file) => file.endsWith('.js'))
+    .map((file) => {
+      const identifier = file.split('.').shift()
+      const route = parseRoute(file)
+      const modulePath = path.join(modulesPath, file)
+      const module = doRequire ? require(modulePath) : modulePath
+
+      return { identifier, route, module }
+    })
+
+  return modules
+}
+
+/**
+ * 比较两个 semver 字符串（只处理 x.y.z，忽略 prerelease 细节）。
+ * @returns {number} a > b → 1，a < b → -1，相等 → 0
+ */
+function compareVersion(a, b) {
+  const parse = (v) =>
+    String(v)
+      .split('.')
+      .map((n) => parseInt(n, 10) || 0)
+  const pa = parse(a)
+  const pb = parse(b)
+  for (let i = 0; i < 3; i++) {
+    if ((pa[i] || 0) > (pb[i] || 0)) return 1
+    if ((pa[i] || 0) < (pb[i] || 0)) return -1
+  }
+  return 0
+}
+
+/**
+ * Check if the version of this API is latest.
+ *
+ * @returns {Promise<VersionCheckResult>} If true, this API is up-to-date;
+ * otherwise, this API should be upgraded and you would
+ * need to notify users to upgrade it manually.
+ */
+function checkVersion() {
+  return new Promise((resolve) => {
+    // 包名必须与 package.json 的 name 一致，否则永远拿不到版本
+    const pkgName = packageJSON.name
+    exec(
+      `npm info ${pkgName} version`,
+      // 限时 5s：启动阶段不该为了版本检查阻塞太久（无网络/离线部署时会一直挂着）
+      { timeout: 5000 },
+      (err, stdout) => {
+        if (!err && stdout && stdout.trim()) {
+          const version = stdout.trim()
+
+          /**
+           * @param {VERSION_CHECK_RESULT} status
+           */
+          const resolveStatus = (status) =>
+            resolve({
+              status,
+              ourVersion: packageJSON.version,
+              npmVersion: version,
+            })
+
+          resolveStatus(
+            compareVersion(version, packageJSON.version) > 0
+              ? VERSION_CHECK_RESULT.NOT_LATEST
+              : VERSION_CHECK_RESULT.LATEST,
+          )
+        } else {
+          resolve({
+            status: VERSION_CHECK_RESULT.FAILED,
+          })
+        }
+      },
+    )
+  })
+}
+
+function parseCorsAllowOrigins(corsAllowOrigin) {
+  if (!corsAllowOrigin) {
+    return null
+  }
+
+  const origins = corsAllowOrigin
+    .split(',')
+    .map((origin) => origin.trim())
+    .filter(Boolean)
+
+  return origins.length > 0 ? origins : null
+}
+
+function getCorsAllowOrigin(allowOrigins, requestOrigin) {
+  if (!allowOrigins) {
+    return requestOrigin || '*'
+  }
+
+  if (allowOrigins.includes('*')) {
+    return '*'
+  }
+
+  if (requestOrigin && allowOrigins.includes(requestOrigin)) {
+    return requestOrigin
+  }
+
+  return null
+}
+
+function createConsoleSpinner(message = '启动中') {
+  if (!process.stdout.isTTY) {
+    return {
+      stop() {},
+    }
+  }
+
+  const frames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏']
+  let index = 0
+  process.stdout.write(`${frames[index]} ${message}...`)
+  const timer = setInterval(() => {
+    index = (index + 1) % frames.length
+    process.stdout.write(`\r${frames[index]} ${message}...`)
+  }, 80)
+
+  return {
+    stop() {
+      clearInterval(timer)
+      process.stdout.write(`\r✔ ${message} 完成。\n`)
+    },
+  }
+}
+
+/**
+ * Construct the server of NCM API.
+ *
+ * @param {ModuleDefinition[]} [moduleDefs] Customized module definitions [advanced]
+ * @returns {Promise<import("express").Express>} The server instance.
+ */
+async function constructServer(moduleDefs) {
+  const app = express()
+  const { CORS_ALLOW_ORIGIN } = process.env
+  const allowOrigins = parseCorsAllowOrigins(CORS_ALLOW_ORIGIN)
+  // trust proxy 默认开启（线上一般都在反向代理后），代价是 X-Forwarded-For 可被伪造，
+  // 进而绕过 /search 的按 IP 限流。直连部署（无代理）时设 TRUST_PROXY=false。
+  app.set('trust proxy', process.env.TRUST_PROXY !== 'false')
+
+  /**
+   * 公开模式（默认开启）：默认放行全部端点，但登录类路由永不回落 NETEASE_COOKIE。
+   *
+   * 两层含义：
+   *  1) 默认（PUBLIC_BLOCK_PREFIXES 未设置）：所有端点可经 HTTP 访问。
+   *     唯一的硬保护是 /login* 路由的 _skipEnvCookie —— 用户自带 cookie 正常，
+   *     无 cookie 时走匿名 token，避免把配置的 MUSIC_U 写进陌生人拿到的响应体
+   *     （/login/refresh 之类会把刷新后的 MUSIC_U 放进响应）。
+   *  2) 设置 PUBLIC_BLOCK_PREFIXES=login,user,cloud,...（逗号分隔前缀，自动补 /）
+   *     后，命中的路由返回 404，与未知路由表现一致。
+   *     公网只提供只读音乐接口时推荐值：
+   *     login,register,activate,captcha,sms,verify,user,cloud,voice,
+   *     daily_signin,personal_fm,scrobble,msg,event,feed,block,inner,log,clientlog,manhole
+   *
+   * 前缀匹配规则：路径等于前缀，或前缀后紧跟 "/"。因此 cloud 不会误伤 /cloudsearch。
+   * 安全前提：/meting 内部通过 require() 直接调用模块函数（不走 HTTP 路由），
+   * 因此封锁这些端点的 HTTP 路由不影响 /meting 任何功能。
+   */
+  const PUBLIC_MODE = process.env.PUBLIC_MODE !== 'false'
+  if (PUBLIC_MODE) {
+    const DANGER_PREFIXES = String(process.env.PUBLIC_BLOCK_PREFIXES || '')
+      .split(',')
+      .map((p) => p.trim())
+      .filter(Boolean)
+      .map((p) => `/${p.replace(/^\/+/, '')}`.replace(/\/+$/, ''))
+      .filter((p) => p !== '/')
+
+    app.use((req, res, next) => {
+      if (DANGER_PREFIXES.length === 0) return next()
+      const p = req.path.replace(/\/+$/, '') || '/'
+      // 静态资源（含扩展名）直接放行
+      if (p.includes('.')) return next()
+      // 检查黑名单：路径以危险前缀开头，且后接字符串结束或 “/”
+      const blocked = DANGER_PREFIXES.some(
+        (prefix) =>
+          p.startsWith(prefix) &&
+          (p.length === prefix.length || p[prefix.length] === '/'),
+      )
+      if (blocked) {
+        return res.status(404).json({ code: 404, data: null, msg: 'Not Found' })
+      }
+      next()
+    })
+    logger.info(
+      DANGER_PREFIXES.length
+        ? `公开模式已启用：已封锁 ${DANGER_PREFIXES.length} 组端点（${DANGER_PREFIXES.join(', ')}）；登录路由不回落 NETEASE_COOKIE`
+        : '公开模式已启用：端点全部放行，登录路由不回落 NETEASE_COOKIE；如需封锁账号/写入类端点，请设置 PUBLIC_BLOCK_PREFIXES',
+    )
+  } else {
+    logger.info(
+      '公开模式已关闭（PUBLIC_MODE=false）：全部原生端点可访问，请确保不暴露在公网',
+    )
+  }
+
+  /**
+   * 调用统计中间件 —— 每个 HTTP 请求递增 api 计数器
+   * 排除 /stats 自身（避免 self-reference 膨胀计数）
+   * recordApi 是同步函数（Node 单线程 JS 中 fs.writeFileSync 原子安全）
+   */
+  app.use((req, res, next) => {
+    if (req.path !== '/stats') {
+      try {
+        stats.recordApi()
+      } catch (e) {
+        logger.warn('stats.recordApi failed', e)
+      }
+    }
+    next()
+  })
+
+  /**
+   * Serving static files
+   */
+  app.use(express.static(path.join(__dirname, 'public')))
+  /**
+   * CORS & Preflight request
+   */
+  app.use((req, res, next) => {
+    if (req.path !== '/' && !req.path.includes('.')) {
+      const corsAllowOrigin = getCorsAllowOrigin(
+        allowOrigins,
+        req.headers.origin,
+      )
+      const shouldSetVaryHeader = corsAllowOrigin && corsAllowOrigin !== '*'
+      res.set({
+        'Access-Control-Allow-Credentials': true,
+        ...(corsAllowOrigin
+          ? { 'Access-Control-Allow-Origin': corsAllowOrigin }
+          : {}),
+        ...(shouldSetVaryHeader ? { Vary: 'Origin' } : {}),
+        'Access-Control-Allow-Headers': 'X-Requested-With,Content-Type',
+        'Access-Control-Allow-Methods': 'PUT,POST,GET,DELETE,OPTIONS',
+        'Content-Type': 'application/json; charset=utf-8',
+      })
+    }
+    req.method === 'OPTIONS' ? res.status(204).end() : next()
+  })
+
+  /**
+   * Cookie Parser
+   */
+  app.use((req, _, next) => {
+    req.cookies = {}
+    //;(req.headers.cookie || '').split(/\s*;\s*/).forEach((pair) => { //  Polynomial regular expression //
+    ;(req.headers.cookie || '').split(/;\s+|(?<!\s)\s+$/g).forEach((pair) => {
+      let crack = pair.indexOf('=')
+      if (crack < 1 || crack == pair.length - 1) return
+      req.cookies[decode(pair.slice(0, crack)).trim()] = decode(
+        pair.slice(crack + 1),
+      ).trim()
+    })
+    next()
+  })
+
+  /**
+   * Body Parser and File Upload
+   */
+  const MAX_UPLOAD_SIZE_MB = 500
+  const MAX_UPLOAD_SIZE_BYTES = MAX_UPLOAD_SIZE_MB * 1024 * 1024
+
+  app.use(express.json({ limit: `${MAX_UPLOAD_SIZE_MB}mb` }))
+  app.use(
+    express.urlencoded({ extended: false, limit: `${MAX_UPLOAD_SIZE_MB}mb` }),
+  )
+
+  app.use(
+    fileUpload({
+      limits: {
+        fileSize: MAX_UPLOAD_SIZE_BYTES,
+      },
+      useTempFiles: true,
+      tempFileDir: require('os').tmpdir(),
+      abortOnLimit: true,
+      parseNested: true,
+    }),
+  )
+
+  /**
+   * /meting 调用统计 —— 必须放在 apicache 之前，
+   * 否则被缓存命中的请求不计入 meting 计数
+   */
+  app.use('/meting', (req, res, next) => {
+    // 排除文档页跳转（缺 type/id 时是 302 重定向到 /meting.html）
+    if (req.query && req.query.type && req.query.id) {
+      try {
+        stats.recordMeting()
+      } catch (e) {
+        logger.warn('stats.recordMeting failed', e)
+      }
+    }
+    next()
+  })
+
+  /**
+   * Cache
+   * 排除 /stats —— 否则首次空数据会被缓存 2 分钟，期间页面看不到真实计数
+   */
+  app.use(
+    cache(
+      '2 minutes',
+      (req, res) => req.path !== '/stats' && res.statusCode === 200,
+    ),
+  )
+
+  /**
+   * Special Routers
+   */
+  const special = {
+    'daily_signin.js': '/daily_signin',
+    'fm_trash.js': '/fm_trash',
+    'personal_fm.js': '/personal_fm',
+  }
+
+  /**
+   * Load every modules in this directory
+   */
+  const moduleDefinitions =
+    moduleDefs ||
+    (await getModulesDefinitions(path.join(__dirname, 'module'), special))
+
+  for (const moduleDef of moduleDefinitions) {
+    // Register the route.
+    // 部分高频触发 NCM 风控的端点（/search）加 IP 限流中间件。
+    const routeMiddlewares = []
+    if (moduleDef.identifier === 'search') {
+      routeMiddlewares.push(searchLimiter)
+    }
+    app.all(moduleDef.route, ...routeMiddlewares, async (req, res) => {
+      ;[req.query, req.body].forEach((item) => {
+        // item may be undefined (some environments / middlewares).
+        // Guard access to avoid "Cannot read properties of undefined (reading 'cookie')".
+        if (item && typeof item.cookie === 'string') {
+          item.cookie = cookieToJson(decode(item.cookie))
+        }
+      })
+
+      const isLoginRoute = moduleDef.route.startsWith('/login')
+      let query = Object.assign(
+        {},
+        { cookie: req.cookies, _req: req },
+        req.query,
+        req.body,
+        req.files,
+        isLoginRoute ? { _skipEnvCookie: true } : {},
+      )
+
+      try {
+        let usedCrypto = ''
+        const moduleResponse = await moduleDef.module(query, (...params) => {
+          const obj = [...params]
+          const options = obj[2] || {}
+          usedCrypto = options.crypto || ''
+          let ip = ''
+
+          if (options.randomCNIP) {
+            ip = global.cnIp
+          } else {
+            ip = req.ip
+
+            if (ip.substring(0, 7) == '::ffff:') {
+              ip = ip.substring(7)
+            }
+            if (ip == '::1') {
+              ip = global.cnIp
+            }
+          }
+
+          obj[2] = {
+            ...options,
+            ip,
+          }
+
+          return request(...obj)
+        })
+        const displayCrypto = usedCrypto || (APP_CONF.encrypt ? 'eapi' : 'api')
+        logger.info(
+          `Request Success: [${displayCrypto}] ${maskUrlSecrets(decode(req.originalUrl))}`,
+        )
+
+        // 夹带私货部分：如果开启了通用解锁，并且是获取歌曲URL的接口，则尝试解锁（如果需要的话）ヾ(≧▽≦*)o
+        if (
+          req.baseUrl === '/song/url/v1' &&
+          process.env.ENABLE_GENERAL_UNBLOCK === 'true'
+        ) {
+          const song = moduleResponse.body.data[0]
+          if (
+            song.freeTrialInfo !== null ||
+            !song.url ||
+            [1, 4].includes(song.fee)
+          ) {
+            const {
+              matchID,
+            } = require('@neteasecloudmusicapienhanced/unblockmusic-utils')
+            logger.info('Starting unblock(uses general unblock):', req.query.id)
+            const result = await matchID(req.query.id)
+            song.url = result.data.url
+            song.freeTrialInfo = null
+            logger.info('Unblock success! url:', song.url)
+          }
+          if (song.url && song.url.includes('kuwo')) {
+            const proxy = process.env.PROXY_URL
+            const useProxy = process.env.ENABLE_PROXY || 'false'
+            if (useProxy === 'true' && proxy) {
+              song.proxyUrl = proxy + song.url
+            }
+          }
+        }
+
+        const cookies = moduleResponse.cookie
+        if (!query.noCookie) {
+          if (Array.isArray(cookies) && cookies.length > 0) {
+            if (req.protocol === 'https') {
+              // Try to fix CORS SameSite Problem
+              res.append(
+                'Set-Cookie',
+                cookies.map((cookie) => {
+                  return cookie + '; SameSite=None; Secure'
+                }),
+              )
+            } else {
+              res.append('Set-Cookie', cookies)
+            }
+          }
+        }
+        if (moduleResponse.redirectUrl) {
+          res.redirect(moduleResponse.status || 302, moduleResponse.redirectUrl)
+          return
+        }
+
+        // NCM 业务码 405 = "操作频繁，请稍候再试"，翻译为 HTTP 429 让客户端
+        // 能正确识别这是限流（而非 Method Not Allowed），并支持 Retry-After。
+        if (moduleResponse.body && Number(moduleResponse.body.code) === 405) {
+          res.set('Retry-After', '30')
+          return res.status(429).send(moduleResponse.body)
+        }
+
+        res.status(moduleResponse.status).send(moduleResponse.body)
+      } catch (/** @type {*} */ moduleResponse) {
+        logger.error(`${maskUrlSecrets(decode(req.originalUrl))}`, {
+          status: moduleResponse.status,
+          body: moduleResponse.body,
+        })
+        if (!moduleResponse.body) {
+          res.status(404).send({
+            code: 404,
+            data: null,
+            msg: 'Not Found',
+          })
+          return
+        }
+        if (moduleResponse.body.code == '301')
+          moduleResponse.body.msg = '需要登录'
+        if (!query.noCookie) {
+          res.append('Set-Cookie', moduleResponse.cookie)
+        }
+
+        // 同样的翻译：catch 分支里 NCM 抛 405 也转为 HTTP 429
+        if (Number(moduleResponse.body.code) === 405) {
+          res.set('Retry-After', '30')
+          return res.status(429).send(moduleResponse.body)
+        }
+
+        res.status(moduleResponse.status).send(moduleResponse.body)
+      }
+    })
+  }
+
+  return app
+}
+
+/**
+ * Serve the NCM API.
+ * @param {NcmApiOptions} options
+ * @returns {Promise<import('express').Express & ExpressExtension>}
+ */
+async function serveNcmApi(options) {
+  const port = Number(options.port || process.env.PORT || '3000')
+  const host = options.host || process.env.HOST || ''
+
+  const spinner = createConsoleSpinner('服务启动中')
+
+  const checkVersionSubmission =
+    options.checkVersion &&
+    checkVersion().then(({ npmVersion, ourVersion, status }) => {
+      if (status == VERSION_CHECK_RESULT.NOT_LATEST) {
+        logger.warn(
+          `最新版本: ${npmVersion}, 当前版本: ${ourVersion}, 请及时更新`,
+        )
+      }
+    })
+  const constructServerSubmission = constructServer(options.moduleDefs)
+
+  const [_, app] = await Promise.all([
+    checkVersionSubmission,
+    constructServerSubmission,
+  ])
+
+  spinner.stop()
+
+  /** @type {import('express').Express & ExpressExtension} */
+  const appExt = app
+  appExt.server = app.listen(port, host, () => {
+    console.log(`
+  ╔═╗╔═╗╦    ╔═╗╔╗╔╦ ╦╔═╗╔╗╔╔═╗╔═╗╔╦╗
+  ╠═╣╠═╝║    ║╣ ║║║╠═╣╠═╣║║║║  ║╣  ║║
+  ╩ ╩╩  ╩    ╚═╝╝╚╝╩ ╩╩ ╩╝╚╝╚═╝╚═╝═╩╝
+                  QIJIE
+    `)
+    logger.info(
+      `Server started successfully @ http://${host ? host : 'localhost'}:${port}`,
+    )
+  })
+
+  return appExt
+}
+
+module.exports = {
+  serveNcmApi,
+  getModulesDefinitions,
+}

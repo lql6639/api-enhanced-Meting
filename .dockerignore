@@ -1,0 +1,18 @@
+# 白名单式忽略：先排除一切，再逐个放行运行时需要的文件。
+# 注意：原来的文件只有 ! 开头的行，缺少起始的 *，等于什么都没排除
+# （会把本地 node_modules / .git / 测试用例一起打进镜像）。
+*
+!module
+!plugins
+!public
+!util
+!data
+!app.js
+!server.js
+!index.js
+!index.mjs
+!main.js
+!generateConfig.js
+!package.json
+!pnpm-lock.yaml
+!LICENSE
