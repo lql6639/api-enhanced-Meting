@@ -73,7 +73,7 @@ function needsUnblock(songItem) {
 /**
  * 把 NCM song 对象转为 meting 协议中 song/playlist/search 的统一返回项。
  *
- * @param {object} song       NCM song 对象（含 id/name/ar/al）
+ * @param {object} song       NCM song 对象（含 id/name/ar|artists）
  * @param {object} opts       { br, cover, server, req }
  * @param {object} query      原始 query，用于向内部模块透传 cookie
  * @param {function} request  server.js 注入的请求函数
@@ -89,7 +89,8 @@ function buildSongItem(song, opts) {
 
   return {
     name: song.name || '',
-    artist: formatArtist(song.ar),
+    // 详情/歌单返回 ar，搜索接口返回 artists（老结构），两边都要兼容
+    artist: formatArtist(song.ar || song.artists),
     url: buildMetingUrl('url', songId, opts.server, urlOpts),
     pic: buildMetingUrl('pic', songId, opts.server, picOpts),
     lrc: buildMetingUrl('lrc', songId, opts.server, lrcOpts),
@@ -239,7 +240,10 @@ module.exports = async (query, request) => {
           request,
         )
         const song = res.body && res.body.songs && res.body.songs[0]
-        return { status: 200, body: formatArtist(song && song.ar) }
+        return {
+          status: 200,
+          body: formatArtist(song && (song.ar || song.artists)),
+        }
       }
 
       case 'url': {

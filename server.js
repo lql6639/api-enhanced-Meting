@@ -376,17 +376,20 @@ async function constructServer(moduleDefs) {
         logger.warn('stats.recordMeting failed', e)
       }
 
-      // 交给 Vercel CDN 缓存：歌单/搜索这类响应一小时才变一次，
-      // 命中后不用再跑函数（部署在香港节点，回源一次约 0.5s）
-      // 直链/封面/歌词是 302 且地址带时效，不能缓存
+      // 交给 Vercel CDN 缓存，命中后不用再跑函数（部署在香港节点，回源一次约 0.5s）
+      // - 列表/搜索：一小时更新一次就够
+      // - 封面/歌词：302 目标不带签名、不会过期，长缓存可省掉每次播放的函数调用
+      // - 直链：路径里带时间戳，会过期，绝对不能缓存
       const type = req.query.type
-      const cacheable = !['url', 'pic', 'lrc'].includes(type)
-      res.setHeader(
-        'Cache-Control',
-        cacheable
-          ? 'public, s-maxage=3600, stale-while-revalidate=86400'
-          : 'no-store',
-      )
+      let cacheControl = 'public, s-maxage=3600, stale-while-revalidate=86400'
+      if (type === 'url') {
+        cacheControl = 'no-store'
+      } else if (type === 'pic' || type === 'lrc') {
+        cacheControl = 'public, s-maxage=86400, stale-while-revalidate=604800'
+      }
+      // 带 cookie 的请求结果可能个性化（VIP 权限），不能进共享缓存
+      if (req.query.cookie) cacheControl = 'private, no-store'
+      res.setHeader('Cache-Control', cacheControl)
     }
     next()
   })
