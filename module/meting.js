@@ -24,7 +24,6 @@ const {
   mergeLyric,
   buildMetingUrl,
   metingBrToNcmBr,
-  pMap,
 } = require('../util/meting')
 
 // 复用现有端点（不修改它们，纯 require 调用）
@@ -41,9 +40,6 @@ const DEFAULT_COVER = 300
 const DEFAULT_LIMIT = 30
 const DEFAULT_PAGE = 1
 const DEFAULT_SEARCH_TYPE = 1
-
-// 并发上限：playlist/search 时对每首歌发起 detail+url+lyric 的 N+1 请求
-const PARALLEL_LIMIT = 8
 
 /**
  * 自动解灰：调用 song_url_match.js（其内部走 matchID）。
@@ -83,62 +79,8 @@ function needsUnblock(songItem) {
  * @param {function} request  server.js 注入的请求函数
  * @returns {object} { name, artist, url, pic, lrc }
  */
-async function buildSongItem(song, opts, query, request) {
+function buildSongItem(song, opts) {
   const songId = song.id
-  // 并行拉取 url + lyric（detail 已经传入，无需再拉）
-  // br: meting 协议用 kbps，NCM 接口要 bps（否则 br=320 被丢弃，触发 30s 预览兜底）
-  const [urlItem, lyricRes] = await Promise.all([
-    songUrlModule(
-      {
-        id: String(songId),
-        br: metingBrToNcmBr(opts.br),
-        cookie: query.cookie,
-      },
-      request,
-    )
-      .then(
-        (res) => (res && res.body && res.body.data && res.body.data[0]) || null,
-      )
-      .catch((e) => {
-        logger.warn(
-          'meting buildSongItem: songUrl failed for',
-          songId,
-          e.message,
-        )
-        return null
-      }),
-    lyricModule({ id: songId, cookie: query.cookie }, request).catch((e) => {
-      logger.warn('meting buildSongItem: lyric failed for', songId, e.message)
-      return null
-    }),
-  ])
-
-  // 自动解灰：url 不可用就试替代音源
-  let finalUrl = ''
-  if (needsUnblock(urlItem)) {
-    finalUrl = await unblockUrl(songId)
-  } else if (urlItem) {
-    finalUrl = urlItem.url || ''
-  }
-
-  // 合并 LRC（中文翻译）
-  let lrcText = ''
-  if (lyricRes && lyricRes.body) {
-    const lrcData = lyricRes.body.lrc
-    const tlyricData = lyricRes.body.tlyric
-    lrcText = mergeLyric(
-      lrcData && lrcData.lyric,
-      tlyricData && tlyricData.lyric,
-    )
-  }
-
-  // picUrl 升级分辨率：NCM 默认 300x300，把尺寸替换为 opts.cover
-  let picUrl = (song.al && song.al.picUrl) || ''
-  if (picUrl && opts.cover && opts.cover !== 300) {
-    picUrl =
-      picUrl.replace(/\?param=\d+y\d+$/, '') +
-      `?param=${opts.cover}y${opts.cover}`
-  }
 
   // 构建 meting URL，传递 req 对象用于自动识别域名
   const urlOpts = { br: opts.br, req: opts.req }
@@ -166,7 +108,7 @@ async function handleSong(query, request, opts) {
   if (!song) {
     return { status: 200, body: '[]' }
   }
-  const item = await buildSongItem(song, opts, query, request)
+  const item = buildSongItem(song, opts)
   return {
     status: 200,
     body: JSON.stringify([item]),
@@ -175,11 +117,9 @@ async function handleSong(query, request, opts) {
 
 /**
  * 歌单：返回包含歌单所有歌曲的 JSON 数组。
- * 对每首歌并行（限流）调用 buildSongItem。
  *
  * 分页：支持 &limit=N&offset=M（默认不限，保持 meting 原协议行为）。
- * 大歌单（上千首）每首都要 detail+url+lyric 三个上游请求，容易超时并触发
- * NCM 风控，公网部署建议客户端显式传 limit。
+ * 只调用一次 playlist_detail，逐首拼链接不再回源，几千首也不会拖慢。
  */
 async function handlePlaylist(query, request, opts) {
   const res = await playlistDetailModule(
@@ -201,11 +141,7 @@ async function handlePlaylist(query, request, opts) {
     return { status: 200, body: '[]' }
   }
 
-  const items = await pMap(
-    tracks,
-    (t) => buildSongItem(t, opts, query, request),
-    PARALLEL_LIMIT,
-  )
+  const items = tracks.map((t) => buildSongItem(t, opts))
   const filtered = items.filter(Boolean)
   return { status: 200, body: JSON.stringify(filtered) }
 }
@@ -235,11 +171,7 @@ async function handleSearch(query, request, opts) {
   if (songs.length === 0) {
     return { status: 200, body: '[]' }
   }
-  const items = await pMap(
-    songs,
-    (s) => buildSongItem(s, opts, query, request),
-    PARALLEL_LIMIT,
-  )
+  const items = songs.map((s) => buildSongItem(s, opts))
   const filtered = items.filter(Boolean)
   return { status: 200, body: JSON.stringify(filtered) }
 }

@@ -364,7 +364,7 @@ async function constructServer(moduleDefs) {
   )
 
   /**
-   * /meting 调用统计 —— 必须放在 apicache 之前，
+   * /meting 调用统计 + CDN 缓存头 —— 必须放在 apicache 之前，
    * 否则被缓存命中的请求不计入 meting 计数
    */
   app.use('/meting', (req, res, next) => {
@@ -375,6 +375,18 @@ async function constructServer(moduleDefs) {
       } catch (e) {
         logger.warn('stats.recordMeting failed', e)
       }
+
+      // 交给 Vercel CDN 缓存：歌单/搜索这类响应一小时才变一次，
+      // 命中后不用再跑函数（部署在香港节点，回源一次约 0.5s）
+      // 直链/封面/歌词是 302 且地址带时效，不能缓存
+      const type = req.query.type
+      const cacheable = !['url', 'pic', 'lrc'].includes(type)
+      res.setHeader(
+        'Cache-Control',
+        cacheable
+          ? 'public, s-maxage=3600, stale-while-revalidate=86400'
+          : 'no-store',
+      )
     }
     next()
   })
@@ -382,13 +394,17 @@ async function constructServer(moduleDefs) {
   /**
    * Cache
    * 排除 /stats —— 否则首次空数据会被缓存 2 分钟，期间页面看不到真实计数
+   * 排除 /meting —— apicache 会覆写 Cache-Control，把上面设的 s-maxage 顶掉
    */
-  app.use(
-    cache(
-      '2 minutes',
-      (req, res) => req.path !== '/stats' && res.statusCode === 200,
-    ),
+  const apiCache = cache(
+    '2 minutes',
+    (req, res) => req.path !== '/stats' && res.statusCode === 200,
   )
+  app.use((req, res, next) => {
+    // 注意请求可能是 /meting 或 /meting/（带尾斜杠）
+    if (/^\/meting\/?$/.test(req.path)) return next()
+    return apiCache(req, res, next)
+  })
 
   /**
    * Special Routers
