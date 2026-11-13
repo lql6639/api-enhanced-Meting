@@ -81,7 +81,7 @@ function mergeLyric(lyric, tlyric) {
  *
  * @param {string} type       url | pic | lrc
  * @param {string} songId     歌曲 ID
- * @param {string} server     数据源（保留字段，meting 客户端会校验，目前仅 netease）
+ * @param {string} server     数据源（netease | tencent）
  * @param {object} [opts]     { br, cover, req } req 为 Express 请求对象，用于自动识别域名
  * @returns {string}
  */

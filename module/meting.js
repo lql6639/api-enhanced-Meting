@@ -4,7 +4,7 @@
  * 完全兼容 meting API 协议（PHP injahow/meting-api）：
  *   ?type=name|artist|url|pic|lrc|song|playlist|search
  *     &id=<songId|playlistId|keyword>
- *     [&server=netease|tencent|...]   ← 仅作保留字段，静默忽略（api-enhanced 仅 netease）
+ *     [&server=netease|tencent]        ← 默认 netease；tencent 走 util/meting-tencent.js
  *     [&br=320|2000|192|128]           ← url 音质
  *     [&cover=300]                     ← pic 封面分辨率
  *     [&limit=30] [&page=1] [&search_type=1]  ← search 专用
@@ -19,6 +19,7 @@
 const createOption = require('../util/option.js')
 const logger = require('../util/logger.js')
 const stats = require('../util/stats')
+const tencent = require('../util/meting-tencent')
 const {
   formatArtist,
   mergeLyric,
@@ -211,14 +212,34 @@ module.exports = async (query, request) => {
     query.cover != null && query.cover !== ''
       ? parseInt(query.cover, 10)
       : parseInt(query.size, 10) || DEFAULT_COVER
+  // 数据源：netease（默认）| tencent。
+  // 其他值直接 400，而不是静默回落网易云 —— 否则拿腾讯 id 查网易云会得到
+  // 一个空数组或风马牛不相及的歌，排查时极具误导性。
+  const server = String(query.server || 'netease').toLowerCase()
+
   const opts = {
     br: Math.max(1, brRaw),
     cover: Math.max(1, coverRaw),
-    server: 'netease', // server 参数静默忽略，仅做保留字段
+    server,
     req: query._req, // 传递 req 对象用于自动识别域名
   }
 
   try {
+    if (server === 'tencent') {
+      return await tencent.handleMeting(type, id, query, opts)
+    }
+    if (server !== 'netease') {
+      return {
+        status: 400,
+        body: {
+          code: 400,
+          msg: 'unsupported server',
+          server,
+          supported: ['netease', 'tencent'],
+        },
+      }
+    }
+
     switch (type) {
       case 'name': {
         const res = await songDetailModule(

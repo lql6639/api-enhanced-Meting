@@ -81,7 +81,7 @@ http://localhost:3000/meting/?type=search&id=Adele&limit=5
 |------|--------|--------|
 | `type` | `name` · `artist` · `url` · `pic` · `lrc` · `song` · `playlist` · `search` | **必填** |
 | `id` | 歌曲/歌单 ID；`type=search` 时为搜索关键词 | **必填** |
-| `server` | 数据源（`netease` · `tencent` · `xiami` · `kugou` · `baidu` · `kuwo`） | `netease`（其他静默忽略） |
+| `server` | 数据源：`netease`（网易云）/ `tencent`（QQ 音乐）；其他值返回 `400` | `netease` |
 | `br` | 音质（仅 `type=url`）：`320` / `192` / `128` / `2000`(flac) | `320` |
 | `cover` | 封面分辨率（仅 `type=pic`） | `300` |
 | `limit` | `type=search` 返回条数；`type=playlist` 返回歌曲数（不传=整张歌单） | `search:30` / `playlist:不限` |
@@ -92,6 +92,28 @@ http://localhost:3000/meting/?type=search&id=Adele&limit=5
 > `type=playlist` 不传 `limit` 时会按整张歌单逐首拉 `detail + url + lyric`（并发 8），
 > 上千首的歌单容易超时并触发网易云风控。公网部署建议客户端显式分页：
 > `?type=playlist&id=xxx&limit=100&offset=0`。
+
+### 腾讯（QQ 音乐）数据源
+
+`server=tencent` 时 `id` 用 QQ 音乐的 **songmid**（如 `002CqtaC3jYZpu`，
+歌单用 disstid），八种 `type` 全部支持：
+
+```bash
+/meting/?server=tencent&type=name&id=002CqtaC3jYZpu      → 虚拟
+/meting/?server=tencent&type=url&id=002CqtaC3jYZpu       → 302 到 QQ CDN 直链
+/meting/?server=tencent&type=playlist&id=7058245180&limit=50&offset=0
+/meting/?server=tencent&type=search&id=周杰伦&limit=10
+```
+
+- **音质**：匿名只能拿 **128k**。QQ 对 320k / flac 返回 `result=104003`，
+  代码会按 `M800 → M500` 自动降级，不会 404。需要 320k 就把带 VIP 的 QQ
+  cookie（含 `uin`、`qm_keyst`）通过 `Cookie` 头或 `?cookie=` 传入。
+- **直链**：服务端直接向 `vkey.GetVkeyServer` 要签名链接并 302，客户端拿到的是
+  标准可播放 URL。不像 Meting-API 在 Vercel 上会返回
+  `@qq_get_url_from_json@callback@...` 这种指令串（标准 Meting 客户端无法解析）。
+- **缓存**：直链带 vkey、会过期，响应已强制 `no-store`；歌单/歌曲元数据可缓存。
+- **限制**：QQ 侧接口要求 `Referer: https://y.qq.com/`，部署在海外节点时若被风控，
+  日志里会出现 `tencent url unavailable`，此时换香港/大陆节点即可。
 
 ### APlayer / MetingJS 集成
 
