@@ -43,7 +43,7 @@ footer a:hover { color:var(--accent); }
 </head>
 <body>
 <main class="container">
-  <h1>🎵 meting 兼容层<span class="tag">新</span></h1>
+  <h1>Meting 兼容层<span class="tag">新</span></h1>
   <p class="sub">api-enhanced 内置的 APlayer / MetingJS 兼容端点 · 完全兼容 injahow/meting-api 协议</p>
 
   <section class="block">
@@ -71,18 +71,18 @@ footer a:hover { color:var(--accent); }
   <section class="block">
     <h2>在线测试</h2>
     <ul class="links">
-      <li><a href="/meting/?type=url&id=33894312" target="_blank">播放链接（302 重定向）: <code>/meting/?type=url&id=33894312</code></a></li>
-      <li><a href="/meting/?type=url&id=416892104&br=2000" target="_blank">FLAC 无损音质: <code>/meting/?type=url&id=416892104&br=2000</code></a></li>
-      <li><a href="/meting/?type=url&id=1385117201" target="_blank">VIP 歌曲测试（无 cookie 应走解灰）: <code>/meting/?type=url&id=1385117201</code></a></li>
-      <li><a href="/meting/?type=pic&id=33894312" target="_blank">封面图（302 重定向）: <code>/meting/?type=pic&id=33894312</code></a></li>
-      <li><a href="/meting/?type=pic&id=416892104&cover=500" target="_blank">封面 500×500: <code>/meting/?type=pic&id=416892104&cover=500</code></a></li>
-      <li><a href="/meting/?type=lrc&id=33894312" target="_blank">歌词（含中文翻译合并）: <code>/meting/?type=lrc&id=33894312</code></a></li>
-      <li><a href="/meting/?type=name&id=33894312" target="_blank">歌曲名: <code>/meting/?type=name&id=33894312</code></a></li>
-      <li><a href="/meting/?type=artist&id=33894312" target="_blank">歌手: <code>/meting/?type=artist&id=33894312</code></a></li>
-      <li><a href="/meting/?type=song&id=33894312&br=320" target="_blank">单曲 JSON: <code>/meting/?type=song&id=33894312</code></a></li>
-      <li><a href="/meting/?type=playlist&id=2619366284" target="_blank">歌单 JSON: <code>/meting/?type=playlist&id=2619366284</code></a></li>
-      <li><a href="/meting/?type=search&id=%E5%91%A8%E6%9D%B0%E4%BC%A6&limit=5" target="_blank">搜索: <code>/meting/?type=search&id=周杰伦&limit=5</code></a></li>
-      <li><a href="/meting/?type=song&id=33894312&server=tencent" target="_blank">server 参数静默忽略: <code>/meting/?type=song&id=33894312&server=tencent</code></a></li>
+      <li><a href="/meting/?type=url&id=25640674" target="_blank">播放链接（302 重定向）: <code>/meting/?type=url&id=25640674</code></a></li>
+      <li><a href="/meting/?type=url&id=25640674&br=2000" target="_blank">FLAC 无损音质: <code>/meting/?type=url&id=25640674&br=2000</code></a></li>
+      <li><a href="/meting/?type=url&id=25640674" target="_blank">VIP 歌曲测试（无 cookie 应走解灰）: <code>/meting/?type=url&id=25640674</code></a></li>
+      <li><a href="/meting/?type=pic&id=25640674" target="_blank">封面图（302 重定向）: <code>/meting/?type=pic&id=25640674</code></a></li>
+      <li><a href="/meting/?type=pic&id=25640674&cover=500" target="_blank">封面 500×500: <code>/meting/?type=pic&id=25640674&cover=500</code></a></li>
+      <li><a href="/meting/?type=lrc&id=25640674" target="_blank">歌词（含中文翻译合并）: <code>/meting/?type=lrc&id=25640674</code></a></li>
+      <li><a href="/meting/?type=name&id=25640674" target="_blank">歌曲名: <code>/meting/?type=name&id=25640674</code></a></li>
+      <li><a href="/meting/?type=artist&id=25640674" target="_blank">歌手: <code>/meting/?type=artist&id=25640674</code></a></li>
+      <li><a href="/meting/?type=song&id=25640674&br=320" target="_blank">单曲 JSON: <code>/meting/?type=song&id=25640674</code></a></li>
+      <li><a href="/meting/?type=playlist&id=3778678" target="_blank">歌单 JSON: <code>/meting/?type=playlist&id=3778678</code></a></li>
+      <li><a href="/meting/?type=search&id=周杰伦&limit=5" target="_blank">搜索: <code>/meting/?type=search&id=周杰伦&limit=5</code></a></li>
+      <li><a href="/meting/?type=song&id=25640674&server=tencent" target="_blank">server 参数静默忽略: <code>/meting/?type=song&id=25640674&server=tencent</code></a></li>
     </ul>
   </section>
 
@@ -91,7 +91,7 @@ footer a:hover { color:var(--accent); }
     <pre>&lt;script&gt;
 window.meting_api = 'http(s)://你的域名:3002/meting/?server=:server&amp;type=:type&amp;id=:id&amp;auth=:auth&amp;r=:r'
 &lt;/script&gt;
-&lt;meting-js server="netease" type="playlist" id="2619366284"&gt;&lt;/meting-js&gt;</pre>
+&lt;meting-js server="netease" type="playlist" id="3778678"&gt;&lt;/meting-js&gt;</pre>
     <p style="margin-top:10px;color:var(--muted);font-size:13px;">如需 VIP 支持：在 nginx 等反代层为 <code>/meting/</code> 注入 <code>Cookie: MUSIC_U=你的token</code> 即可。</p>
   </section>
 
@@ -106,7 +106,7 @@ window.meting_api = 'http(s)://你的域名:3002/meting/?server=:server&amp;type
   </section>
 
   <section class="block">
-    <h2>📊 调用统计</h2>
+    <h2>调用统计</h2>
     <div class="stats-grid">
       <div class="stat-card api">
         <div class="label">api-enhanced 总调用</div>
