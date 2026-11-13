@@ -227,6 +227,23 @@ async function constructServer(moduleDefs) {
   app.set('trust proxy', process.env.TRUST_PROXY !== 'false')
 
   /**
+   * 关掉 Express 自动 ETag —— 不是为了省流量，是为了避免 304 把 CORS 头弄丢。
+   *
+   * 现象：浏览器请求 /meting 时带 If-None-Match，Vercel 边缘用缓存里的 ETag
+   * 直接回一个 304，而这个 304 响应里 **没有 Access-Control-Allow-Origin**
+   * （实测确认）。浏览器拿到不带通行证的 304，CORS 校验直接失败，控制台报
+   * `net::ERR_FAILED 304 (Not Modified)`，播放列表整段加载不出来。
+   *
+   * 更糟的是它会让「已经被污染的旧缓存」永远修不好：旧条目没有 Vary，
+   * 浏览器会拿它匹配任意来源，然后每次只发条件请求，永远等不到一个带正确
+   * ACAO 的完整响应。
+   *
+   * 去掉 ETag 后，浏览器只能拿完整的 200，响应里 ACAO 是本请求的 Origin，
+   * 旧条目被覆盖，一次就自愈。静态资源走 express.static，自带 ETag 不受影响。
+   */
+  app.set('etag', false)
+
+  /**
    * 公开模式（默认开启）：默认放行全部端点，但登录类路由永不回落 NETEASE_COOKIE。
    *
    * 两层含义：
