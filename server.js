@@ -302,26 +302,51 @@ async function constructServer(moduleDefs) {
   app.use(express.static(path.join(__dirname, 'public')))
   /**
    * CORS & Preflight request
+   *
+   * 关键约束：/meting 的响应是 public + s-maxage 的 CDN 缓存对象（见下方缓存头），
+   * 而 Access-Control-Allow-Origin 又依赖请求方 Origin。若不声明 Vary: Origin，
+   * 边缘节点会把「为 A 站点生成的响应」直接复用给 B 站点，浏览器就报
+   * “Access-Control-Allow-Origin 的值是 X，与请求来源不一致”。
+   * 换域名（blog.lovlin.cn → lovlin.cn）后随机报 CORS，根因就在这里。
+   * 所以 Vary 无条件写入，而不是只在回显具体 Origin 时才写。
    */
   app.use((req, res, next) => {
-    if (req.path !== '/' && !req.path.includes('.')) {
-      const corsAllowOrigin = getCorsAllowOrigin(
-        allowOrigins,
-        req.headers.origin,
-      )
-      const shouldSetVaryHeader = corsAllowOrigin && corsAllowOrigin !== '*'
-      res.set({
-        'Access-Control-Allow-Credentials': true,
-        ...(corsAllowOrigin
-          ? { 'Access-Control-Allow-Origin': corsAllowOrigin }
-          : {}),
-        ...(shouldSetVaryHeader ? { Vary: 'Origin' } : {}),
-        'Access-Control-Allow-Headers': 'X-Requested-With,Content-Type',
-        'Access-Control-Allow-Methods': 'PUT,POST,GET,DELETE,OPTIONS',
-        'Content-Type': 'application/json; charset=utf-8',
-      })
+    const requestOrigin = req.headers.origin
+    const corsAllowOrigin = getCorsAllowOrigin(allowOrigins, requestOrigin)
+
+    res.set('Vary', 'Origin')
+
+    if (corsAllowOrigin) {
+      res.set('Access-Control-Allow-Origin', corsAllowOrigin)
+      // 规范要求：ACAO 为 * 时不得同时声明 Allow-Credentials，否则浏览器直接拒绝
+      if (corsAllowOrigin !== '*') {
+        res.set('Access-Control-Allow-Credentials', 'true')
+      }
     }
-    req.method === 'OPTIONS' ? res.status(204).end() : next()
+
+    res.set(
+      'Access-Control-Allow-Headers',
+      req.headers['access-control-request-headers'] ||
+        'X-CSRF-Token,X-Requested-With,Accept,Accept-Version,Content-Length,' +
+          'Content-MD5,Content-Type,Date,X-Api-Version',
+    )
+    res.set(
+      'Access-Control-Allow-Methods',
+      'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
+    )
+    res.set('Access-Control-Expose-Headers', 'Content-Length,Content-Range')
+
+    // API 路由统一按 JSON 返回：Express 的 res.send(string) 默认写成 text/html，
+    // 播放器会按 HTML 处理导致解析失败。静态资源（带扩展名）不在此列。
+    if (req.method !== 'OPTIONS' && !req.path.includes('.')) {
+      res.set('Content-Type', 'application/json; charset=utf-8')
+    }
+
+    if (req.method === 'OPTIONS') {
+      res.status(204).end()
+      return
+    }
+    next()
   })
 
   /**
