@@ -108,6 +108,17 @@ http://localhost:3000/meting/?type=search&id=Adele&limit=5
 - **音质**：匿名只能拿 **128k**。QQ 对 320k / flac 返回 `result=104003`，
   代码会按 `M800 → M500` 自动降级，不会 404。需要 320k 就把带 VIP 的 QQ
   cookie（含 `uin`、`qm_keyst`）通过 `Cookie` 头或 `?cookie=` 传入。
+- **VIP / 版权曲**：匿名请求这类歌（例如周杰伦几乎所有作品）任意码率都是
+  `result=104003`，此时会自动解灰——用歌名 + 歌手反查网易云 id，交给 `matchID`
+  从酷我 / 咪咕 / QQ 等替代源取直链（与网易云灰色歌曲同一套逻辑），命中即 302。
+  匹配要求歌名、歌手完全一致并按时长择优，宁可 404 也不放错歌；全部失败时返回
+  `404 {"reason":"vip"}`。设 `TENCENT_UNBLOCK=off` 可关闭这条兜底。
+  解灰结果按歌曲缓存 20 分钟；解灰借用网易云搜索，因此做了串行 + 间隔 +
+  每分钟 8 次配额，撞到「操作频繁（405）」直接熔断 5 分钟，避免把整个
+  网易云接口（含 `/search`）的风控额度打光。高流量场景建议按需关闭。
+- **搜索**：QQ 已把 `musicu` 的 `SearchCgiService` 改成必须登录（`req.code=2001`），
+  这里走匿名可用的 `c.y.qq.com/soso/fcgi-bin/search_for_qq_cp`，空结果时再退
+  `smartbox` 联想接口兜底。
 - **直链**：服务端直接向 `vkey.GetVkeyServer` 要签名链接并 302，客户端拿到的是
   标准可播放 URL。不像 Meting-API 在 Vercel 上会返回
   `@qq_get_url_from_json@callback@...` 这种指令串（标准 Meting 客户端无法解析）。

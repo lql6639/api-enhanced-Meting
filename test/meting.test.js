@@ -5,6 +5,10 @@ const { default: axios } = require('axios')
 const SONG_ID_OK = 33894312 // 海阔天空 - Beyond (常规可播放)
 const PLAYLIST_ID_OK = 2619366284 // meting 官方 demo 歌单
 const KEYWORD_OK = 'Adele'
+// 腾讯（QQ 音乐）：非 VIP 免费歌曲，匿名即可取到 128k 直链
+const TENCENT_MID = '004KhBLZ3NUks1'
+// VIP / 版权曲（晴天），匿名 vkey 必失败，走自动解灰拿替代音源
+const TENCENT_VIP_MID = '0039MnYb0qxYhV'
 
 // 在每个请求里实时读取 global.host（由 server.test.js 的 before 钩子设置），
 // 而不是模块加载时一次性缓存，因为此时全局还没被设置。
@@ -47,14 +51,14 @@ describe('meting 兼容层 /meting', () => {
       assert.strictEqual(res.status, 400)
     })
 
-    it('server 参数静默忽略（不报错）', async () => {
+    it('不支持的 server 应返回 400 并列出可选值', async () => {
       const res = await get('/meting', {
         type: 'name',
         id: SONG_ID_OK,
-        server: 'tencent',
+        server: 'kugou',
       })
-      assert.strictEqual(res.status, 200)
-      assert.strictEqual(typeof res.data, 'string')
+      assert.strictEqual(res.status, 400)
+      assert.deepStrictEqual(res.data.supported, ['netease', 'tencent'])
     })
   })
 
@@ -79,8 +83,8 @@ describe('meting 兼容层 /meting', () => {
       const res = await get('/meting', { type: 'lrc', id: SONG_ID_OK })
       assert.strictEqual(res.status, 200)
       assert.strictEqual(typeof res.data, 'string')
-      // 空歌 fallback 也算合法（包含 [00:00.00]）
-      assert.ok(/\[00:\d{2}\.\d{2}\]/.test(res.data), '应包含 LRC 时间戳')
+      // 空歌 fallback 也算合法（包含 [00:00.00]）；网易云会带毫秒位 [00:00.000]
+      assert.ok(/\[00:\d{2}\.\d{2,3}\]/.test(res.data), '应包含 LRC 时间戳')
     })
   })
 
@@ -235,6 +239,82 @@ describe('meting 兼容层 /meting', () => {
       assert.strictEqual(res.status, 200)
       assert.strictEqual(res.data.length, 1)
       assert.ok(res.data[0].url.includes('br=2000'))
+    })
+  })
+
+  describe('腾讯（QQ 音乐）数据源', () => {
+    it('type=name / artist 返回文本', async () => {
+      const [nameRes, artistRes] = await Promise.all([
+        get('/meting', { server: 'tencent', type: 'name', id: TENCENT_MID }),
+        get('/meting', { server: 'tencent', type: 'artist', id: TENCENT_MID }),
+      ])
+      assert.strictEqual(nameRes.status, 200)
+      assert.ok(String(nameRes.data).length > 0)
+      assert.strictEqual(artistRes.status, 200)
+      assert.ok(String(artistRes.data).length > 0)
+    })
+
+    it('type=url 匿名可取到 128k 直链（302）', async () => {
+      const res = await get('/meting', {
+        server: 'tencent',
+        type: 'url',
+        id: TENCENT_MID,
+      })
+      assert.strictEqual(res.status, 302)
+      assert.ok(/^https:\/\//.test(res.headers.location))
+      assert.ok(/\.mp3\?/.test(res.headers.location))
+    })
+
+    it('type=pic 指向 y.gtimg.cn 封面', async () => {
+      const res = await get('/meting', {
+        server: 'tencent',
+        type: 'pic',
+        id: TENCENT_MID,
+        cover: 300,
+      })
+      assert.strictEqual(res.status, 302)
+      assert.ok(res.headers.location.includes('y.gtimg.cn'))
+      assert.ok(res.headers.location.includes('300x300'))
+    })
+
+    it('type=search 返回协议字段完整的数组', async () => {
+      const res = await get('/meting', {
+        server: 'tencent',
+        type: 'search',
+        id: '稻香',
+        limit: 3,
+      })
+      assert.strictEqual(res.status, 200)
+      assert.ok(Array.isArray(res.data), '应是数组')
+      assert.ok(res.data.length > 0, '搜索结果不应为空')
+      assert.ok(res.data.length <= 3, '不应超过 limit')
+      const item = res.data[0]
+      for (const k of ['name', 'artist', 'url', 'pic', 'lrc']) {
+        assert.ok(k in item, `首元素应包含字段 ${k}`)
+      }
+      assert.ok(
+        item.url.includes('server=tencent'),
+        '子链接应带 server=tencent',
+      )
+    })
+
+    it('VIP 曲自动解灰：302 替代音源或明确 404，不返回 500', async function () {
+      // 解灰要串一次网易云搜索 + matchID，冷启动可能耗时数秒
+      this.timeout(90000)
+      const res = await get(
+        '/meting',
+        { server: 'tencent', type: 'url', id: TENCENT_VIP_MID },
+        { timeoutMs: 90000 },
+      )
+      assert.ok(
+        res.status === 302 || res.status === 404,
+        `unexpected status ${res.status}`,
+      )
+      if (res.status === 302) {
+        assert.ok(/^https?:\/\//.test(res.headers.location))
+      } else {
+        assert.strictEqual(res.data.reason, 'vip')
+      }
     })
   })
 })
